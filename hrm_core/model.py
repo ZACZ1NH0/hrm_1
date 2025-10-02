@@ -1,42 +1,72 @@
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 from .config import HRMCoreConfig
-from .blocks import ReasoningModule
+from .inner import HRMCoreInner
 
 
-class HRMCoreInner(nn.Module):
-    """Two-level fixed-cycle hierarchical reasoning core (H supervises L)."""
+class HRMForQA(nn.Module):
+    """Minimal HRM-based extractive reader for multi-hop QA."""
     def __init__(self, cfg: HRMCoreConfig):
         super().__init__()
         self.cfg = cfg
-        self.H_level = ReasoningModule(cfg.hidden_size, cfg.num_heads, cfg.ff_mult, cfg.H_layers)
-        self.L_level = ReasoningModule(cfg.hidden_size, cfg.num_heads, cfg.ff_mult, cfg.L_layers)
 
-        # Learnable initial latent states
-        self.H_init = nn.Parameter(torch.zeros(1, 1, cfg.hidden_size))
-        self.L_init = nn.Parameter(torch.zeros(1, 1, cfg.hidden_size))
+        # Embeddings (can be swapped for external encoder outputs)
+        self.token_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        self.pos_emb = nn.Embedding(cfg.max_position_embeddings, cfg.hidden_size)
+        self.ln_in = nn.LayerNorm(cfg.hidden_size)
+
+        # Hierarchical core
+        self.inner = HRMCoreInner(cfg)
+
+        # Span head
+        self.qa_head = nn.Linear(cfg.hidden_size, 2)
+
+    def init_states(self, batch_size: int, seq_len: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        H0 = self.inner.H_init.expand(batch_size, seq_len, -1).to(device)
+        L0 = self.inner.L_init.expand(batch_size, seq_len, -1).to(device)
+        return H0, L0
 
     def forward(
         self,
-        z_H: torch.Tensor,
-        z_L: torch.Tensor,
-        token_embeddings: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """One outer pass comprising H/L cycles.
-        Shapes:
-          z_H, z_L: [B, S, D]
-          token_embeddings: [B, S, D]
-          key_padding_mask: [B, S] with True for PAD/ignored positions
-        """
-        x_H, x_L = z_H, z_L
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,  # 1=keep, 0=pad
+        start_positions: Optional[torch.Tensor] = None,
+        end_positions: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        B, S = input_ids.shape
+        device = input_ids.device
 
-        for _ in range(self.cfg.H_cycles):
-            for _ in range(self.cfg.L_cycles):
-                # L conditions on H + inputs
-                x_L = self.L_level(x_L, injected=x_H + token_embeddings, key_padding_mask=key_padding_mask)
-            # H updates conditioned on L summary
-            x_H = self.H_level(x_H, injected=x_L, key_padding_mask=key_padding_mask)
+        # Build embeddings
+        pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
+        x = self.token_emb(input_ids) + self.pos_emb(pos)
+        x = self.ln_in(x)
 
-        return x_H, x_L
+        # Init states
+        z_H, z_L = self.init_states(B, S, device)
+
+        # Convert HF-style attention_mask -> key_padding_mask (True means masked)
+        key_padding_mask = None
+        if attention_mask is not None:
+            key_padding_mask = (attention_mask == 0)
+
+        # Fixed-step hierarchical reasoning
+        z_H, z_L = self.inner(z_H, z_L, token_embeddings=x, key_padding_mask=key_padding_mask)
+
+        # Span head on H-level states
+        logits = self.qa_head(z_H)  # [B, S, 2]
+        start_logits, end_logits = logits[..., 0], logits[..., 1]
+
+        out = {"start_logits": start_logits, "end_logits": end_logits}
+
+        if start_positions is not None and end_positions is not None:
+            ignored_index = start_logits.size(1)
+            start_positions = start_positions.clamp(0, ignored_index)
+            end_positions = end_positions.clamp(0, ignored_index)
+
+            loss_fct = nn.CrossEntropyLoss(ignore_index=ignored_index)
+            start_loss = loss_fct(start_logits, start_positions)
+            end_loss = loss_fct(end_logits, end_positions)
+            out["loss"] = (start_loss + end_loss) / 2
+
+        return out
