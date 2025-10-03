@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModel
 
 from hrm_core import HRMCoreConfig, HRMForQA
 from datasets.hotpotqa import HotpotQADataset, collate_train, collate_eval
@@ -118,14 +118,22 @@ def main():
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--out_dir', type=str, default='checkpoints')
+    parser.add_argument('--encoder_name', type=str, default='', help='HF encoder name, e.g., bert-base-uncased')
+    parser.add_argument('--freeze_encoder', action='store_true')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     set_seed(args.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, use_fast=True)
-
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.encoder_name or 'bert-base-uncased', use_fast=True)
+    
+    encoder = None
+    if args.encoder_name:
+        encoder = AutoModel.from_pretrained(args.encoder_name).to(device)
+        if args.freeze_encoder:
+            for p in encoder.parameters():
+                p.requires_grad = False
     # Data
     train_ds = HotpotQADataset(args.train_path, tokenizer, max_length=args.max_length)
     dev_ds = HotpotQADataset(args.dev_path, tokenizer, max_length=args.max_length)
@@ -153,9 +161,20 @@ def main():
             attention_mask = batch['attention_mask'].to(device)
             start_positions = batch['start_positions'].to(device)
             end_positions = batch['end_positions'].to(device)
-
-            out = model(input_ids=input_ids, attention_mask=attention_mask,
-                        start_positions=start_positions, end_positions=end_positions)
+            
+            if encoder is not None:
+                with torch.no_grad() if args.freeze_encoder else torch.enable_grad():
+                    enc_out = encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True).last_hidden_state
+                out = model(attention_mask=attention_mask,
+                    inputs_embeds=enc_out,
+                    start_positions=start_positions,
+                    end_positions=end_positions)
+            else:
+                out = model(input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    start_positions=start_positions,
+                    end_positions=end_positions)
+            
             loss = out['loss']
 
             opt.zero_grad()
