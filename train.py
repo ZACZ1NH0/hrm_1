@@ -143,7 +143,7 @@ def main():
 
     # Model
     cfg = HRMCoreConfig(vocab_size=tokenizer.vocab_size, max_position_embeddings=args.max_length,
-                        hidden_size=512, num_heads=8, ff_mult=4, H_layers=2, L_layers=2,
+                        hidden_size=768, num_heads=12, ff_mult=4, H_layers=2, L_layers=2,
                         H_cycles=2, L_cycles=1)
     model = HRMForQA(cfg).to(device)
 
