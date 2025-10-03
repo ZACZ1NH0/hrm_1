@@ -35,13 +35,12 @@ class HRMForQA(nn.Module):
         end_positions: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        
+        B, S = (inputs_embeds.size(0), inputs_embeds.size(1)) if inputs_embeds is not None else input_ids.shape
+        device = (inputs_embeds.device if inputs_embeds is not None else input_ids.device)
         if inputs_embeds is not None:
             # đã có pos từ encoder → KHÔNG cộng pos_emb lần nữa
             x = self.ln_in(inputs_embeds)
         else:
-            B, S = input_ids.shape
-            device = input_ids.device
             pos = torch.arange(S, device=device).unsqueeze(0).expand(B, S)
             x = self.token_emb(input_ids) + self.pos_emb(pos)
             x = self.ln_in(x)
