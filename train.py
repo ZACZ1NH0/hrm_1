@@ -18,7 +18,7 @@ import re, string
 
 def normalize_answer(s: str) -> str:
     s = s.lower()
-    s = re.sub(r"(a|an|the)", " ", s)
+    s = re.sub(r"\b(a|an|the)\b", " ", s)
     s = ''.join(ch for ch in s if ch not in string.punctuation)
     s = ' '.join(s.split())
     return s
@@ -112,7 +112,7 @@ def main():
     parser.add_argument('--tokenizer', type=str, default='bert-base-uncased')
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--grad_clip', type=float, default=1.0)
