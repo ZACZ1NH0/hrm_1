@@ -180,7 +180,6 @@ def main():
 
             opt.zero_grad()
             scaler.scale(loss).backward()
-            loss.backward()
             if args.grad_clip is not None and args.grad_clip > 0:
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
