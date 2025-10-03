@@ -156,6 +156,7 @@ def main():
         model.train()
         pbar = tqdm(DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_train),
                     desc=f"train epoch {epoch}")
+        scaler = torch.cuda.amp.GradScaler()
         for batch in pbar:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -178,10 +179,14 @@ def main():
             loss = out['loss']
 
             opt.zero_grad()
+            scaler.scale(loss).backward()
             loss.backward()
             if args.grad_clip is not None and args.grad_clip > 0:
+                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            opt.step()
+            # opt.step()
+            scaler.step(opt)
+            scaler.update()
 
             global_step += 1
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
