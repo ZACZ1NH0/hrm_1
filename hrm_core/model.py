@@ -29,7 +29,7 @@ class HRMForQA(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor = None,
         attention_mask: Optional[torch.Tensor] = None,  # 1=keep, 0=pad
         start_positions: Optional[torch.Tensor] = None,
         end_positions: Optional[torch.Tensor] = None,
