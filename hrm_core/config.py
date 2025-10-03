@@ -4,8 +4,8 @@ from dataclasses import dataclass
 @dataclass
 class HRMCoreConfig:
     vocab_size: int
-    hidden_size: int = 512
-    num_heads: int = 8
+    hidden_size: int = 768
+    num_heads: int = 12
     ff_mult: int = 4
     max_position_embeddings: int = 512
 

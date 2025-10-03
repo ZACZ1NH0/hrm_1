@@ -111,7 +111,7 @@ def main():
     parser.add_argument('--dev_path', type=str, required=True, help='./hotpot_dev_distractor_v1.json')
     parser.add_argument('--tokenizer', type=str, default='bert-base-uncased')
     parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--weight_decay', type=float, default=0.01)
