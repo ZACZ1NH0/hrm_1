@@ -56,18 +56,40 @@ def set_seed(seed: int = 42):
 
 # --------- Train/Eval ---------
 
-def best_span(start_logits: torch.Tensor, end_logits: torch.Tensor, attn_mask: torch.Tensor):
-    """Greedy best span per item: pick best start, then best end >= start among unmasked tokens."""
+# def best_span(start_logits: torch.Tensor, end_logits: torch.Tensor, attn_mask: torch.Tensor):
+#     """Greedy best span per item: pick best start, then best end >= start among unmasked tokens."""
+#     B, S = start_logits.shape
+#     starts = start_logits.masked_fill(attn_mask == 0, -1e9).argmax(dim=1)  # [B]
+#     ends = []
+#     for b in range(B):
+#         s = starts[b].item()
+#         end = end_logits[b].masked_fill((attn_mask[b] == 0) | (torch.arange(S, device=end_logits.device) < s), -1e9).argmax().item()
+#         ends.append(end)
+#     ends = torch.tensor(ends, device=start_logits.device)
+#     return starts, ends
+def best_span(start_logits, end_logits, attn_mask, max_answer_len=30):
     B, S = start_logits.shape
-    starts = start_logits.masked_fill(attn_mask == 0, -1e9).argmax(dim=1)  # [B]
-    ends = []
+    start_scores = start_logits.masked_fill(attn_mask == 0, -1e9)
+    end_scores   = end_logits.masked_fill(attn_mask == 0, -1e9)
+    best_s = torch.zeros(B, dtype=torch.long, device=start_logits.device)
+    best_e = torch.zeros(B, dtype=torch.long, device=start_logits.device)
     for b in range(B):
-        s = starts[b].item()
-        end = end_logits[b].masked_fill((attn_mask[b] == 0) | (torch.arange(S, device=end_logits.device) < s), -1e9).argmax().item()
-        ends.append(end)
-    ends = torch.tensor(ends, device=start_logits.device)
-    return starts, ends
-
+        s_scores = start_scores[b]
+        e_scores = end_scores[b]
+        # prefix max để tìm nhanh e cho mỗi s trong cửa sổ dài tối đa
+        best = -1e9
+        bs = be = 0
+        for s in range(S):
+            e_max = min(S-1, s + max_answer_len)
+            # lấy e trong [s, e_max] có điểm cao nhất
+            e_slice = e_scores[s:e_max+1]
+            e_rel = torch.argmax(e_slice).item()
+            e = s + e_rel
+            val = (s_scores[s] + e_scores[e]).item()
+            if val > best:
+                best = val; bs = s; be = e
+        best_s[b] = bs; best_e[b] = be
+    return best_s, best_e
 
 def evaluate(model, tokenizer, loader, device):
     model.eval()
@@ -135,8 +157,8 @@ def main():
             for p in encoder.parameters():
                 p.requires_grad = False
     # Data
-    train_ds = HotpotQADataset(args.train_path, tokenizer, max_length=args.max_length)
-    dev_ds = HotpotQADataset(args.dev_path, tokenizer, max_length=args.max_length)
+    train_ds = HotpotQADataset(args.train_path, tokenizer, max_length=args.max_length, doc_stride=128, is_train=True)
+    dev_ds = HotpotQADataset(args.dev_path, tokenizer, max_length=args.max_length, doc_stride=128, is_train=True)
 
     train_ld = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_train)
     dev_ld = DataLoader(dev_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_eval)
