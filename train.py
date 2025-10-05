@@ -91,39 +91,84 @@ def best_span(start_logits, end_logits, attn_mask, max_answer_len=30):
         best_s[b] = bs; best_e[b] = be
     return best_s, best_e
 
-def evaluate(model, tokenizer, loader, device):
+# def evaluate(model, tokenizer, loader, device):
+#     model.eval()
+#     losses = []
+#     ems, f1s = [], []
+#     with torch.no_grad():
+#         for batch in tqdm(loader, desc="eval", leave=False):
+#             input_ids = batch['input_ids'].to(device)
+#             attention_mask = batch['attention_mask'].to(device)
+#             start_positions = None
+#             end_positions = None
+#             if 'start_positions' in batch:
+#                 start_positions = batch['start_positions'].to(device)
+#                 end_positions = batch['end_positions'].to(device)
+
+#             out = model(input_ids=input_ids, attention_mask=attention_mask,
+#                         start_positions=start_positions, end_positions=end_positions)
+#             if 'loss' in out:
+#                 losses.append(out['loss'].item())
+
+#             # Decode predictions
+#             s_idx, e_idx = best_span(out['start_logits'], out['end_logits'], attention_mask)
+#             for i in range(input_ids.size(0)):
+#                 pred_ids = input_ids[i, s_idx[i]:e_idx[i] + 1].detach().cpu().tolist()
+#                 pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
+#                 gold_text = batch['answer_text'][i]
+#                 ems.append(exact_match_score(pred_text, gold_text))
+#                 f1s.append(f1_score(pred_text, gold_text))
+
+#     avg_loss = float(np.mean(losses)) if losses else 0.0
+#     avg_em = float(np.mean(ems)) if ems else 0.0
+#     avg_f1 = float(np.mean(f1s)) if f1s else 0.0
+#     return {"loss": avg_loss, "EM": avg_em, "F1": avg_f1}
+def evaluate(model, tokenizer, loader, device, encoder=None, amp=False, max_answer_len=30):
     model.eval()
-    losses = []
-    ems, f1s = [], []
+    losses = []; id2best = {}
+    import contextlib
+    autocast_ctx = (torch.autocast("cuda", enabled=amp and torch.cuda.is_available())
+                    if torch.cuda.is_available() else contextlib.nullcontext())
     with torch.no_grad():
         for batch in tqdm(loader, desc="eval", leave=False):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            start_positions = None
-            end_positions = None
+
+            with autocast_ctx:
+                if encoder is not None:
+                    enc_out = encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True).last_hidden_state
+                    enc_out = enc_out.to(model.ln_in.weight.dtype)
+                    out = model(attention_mask=attention_mask, inputs_embeds=enc_out)
+                else:
+                    out = model(input_ids=input_ids, attention_mask=attention_mask)
+
             if 'start_positions' in batch:
                 start_positions = batch['start_positions'].to(device)
-                end_positions = batch['end_positions'].to(device)
+                end_positions   = batch['end_positions'].to(device)
+                with autocast_ctx:
+                    if encoder is not None:
+                        out_loss = model(attention_mask=attention_mask, inputs_embeds=enc_out,
+                                         start_positions=start_positions, end_positions=end_positions)
+                    else:
+                        out_loss = model(input_ids=input_ids, attention_mask=attention_mask,
+                                         start_positions=start_positions, end_positions=end_positions)
+                losses.append(out_loss['loss'].item())
 
-            out = model(input_ids=input_ids, attention_mask=attention_mask,
-                        start_positions=start_positions, end_positions=end_positions)
-            if 'loss' in out:
-                losses.append(out['loss'].item())
-
-            # Decode predictions
-            s_idx, e_idx = best_span(out['start_logits'], out['end_logits'], attention_mask)
+            s_idx, e_idx, span_val = best_span_and_score(out['start_logits'], out['end_logits'], attention_mask, max_answer_len)
             for i in range(input_ids.size(0)):
-                pred_ids = input_ids[i, s_idx[i]:e_idx[i] + 1].detach().cpu().tolist()
+                ex_id = batch['id'][i]
+                pred_ids = input_ids[i, s_idx[i]:e_idx[i]+1].detach().cpu().tolist()
                 pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
+                score = float(span_val[i].item())
                 gold_text = batch['answer_text'][i]
-                ems.append(exact_match_score(pred_text, gold_text))
-                f1s.append(f1_score(pred_text, gold_text))
+                if (ex_id not in id2best) or (score > id2best[ex_id]['score']):
+                    id2best[ex_id] = {'pred': pred_text, 'gold': gold_text, 'score': score}
 
-    avg_loss = float(np.mean(losses)) if losses else 0.0
-    avg_em = float(np.mean(ems)) if ems else 0.0
-    avg_f1 = float(np.mean(f1s)) if f1s else 0.0
-    return {"loss": avg_loss, "EM": avg_em, "F1": avg_f1}
-
+    ems = [exact_match_score(v['pred'], v['gold']) for v in id2best.values()]
+    f1s = [f1_score(v['pred'], v['gold']) for v in id2best.values()]
+    return {"loss": float(np.mean(losses)) if losses else 0.0,
+            "EM": float(np.mean(ems)) if ems else 0.0,
+            "F1": float(np.mean(f1s)) if f1s else 0.0}
 
 # --------- Main ---------
 
