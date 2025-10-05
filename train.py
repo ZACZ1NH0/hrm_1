@@ -91,6 +91,25 @@ def best_span(start_logits, end_logits, attn_mask, max_answer_len=30):
         best_s[b] = bs; best_e[b] = be
     return best_s, best_e
 
+def best_span_and_score(start_logits, end_logits, attn_mask, max_answer_len=30):
+    B, S = start_logits.shape
+    start_scores = start_logits.masked_fill(attn_mask == 0, -1e9)
+    end_scores   = end_logits.masked_fill(attn_mask == 0, -1e9)
+    best_s = torch.zeros(B, dtype=torch.long, device=start_logits.device)
+    best_e = torch.zeros(B, dtype=torch.long, device=start_logits.device)
+    best_val = torch.full((B,), -1e9, device=start_logits.device)
+    for b in range(B):
+        s_scores = start_scores[b]; e_scores = end_scores[b]
+        cur = -1e9; bs = be = 0
+        for s in range(S):
+            e_max = min(S-1, s+30)
+            e_rel = int(torch.argmax(e_scores[s:e_max+1]))
+            e = s + e_rel
+            val = (s_scores[s] + e_scores[e]).item()
+            if val > cur: cur = val; bs = s; be = e
+        best_s[b], best_e[b], best_val[b] = bs, be, cur
+    return best_s, best_e, best_val
+
 # def evaluate(model, tokenizer, loader, device):
 #     model.eval()
 #     losses = []
