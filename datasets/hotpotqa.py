@@ -181,7 +181,7 @@ class HotpotQADataset(Dataset):
                 # offsets và sequence ids cho feature i
                 offsets = offset_mapping[i]
                 seq_ids = enc.sequence_ids(i)  # None/0(question)/1(context)
-
+                context_mask = torch.tensor([1 if sid == 1 else 0 for sid in seq_ids], dtype=torch.long)
                 start_char = qa["answer_start"]
                 end_char = start_char + len(qa["answer_text"])
 
@@ -215,6 +215,7 @@ class HotpotQADataset(Dataset):
                     "attention_mask": attention_mask[i],
                     "id": qa["id"],
                     "answer_text": qa["answer_text"],
+                    "context_mask": context_mask,
                 }
                 if self.is_train:
                     feat["start_positions"] = torch.tensor(start_pos, dtype=torch.long)
@@ -231,6 +232,7 @@ def collate_train(batch):
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+        "context_mask": torch.stack([b["context_mask"] for b in batch]),  # <<
         "start_positions": torch.stack([b["start_positions"] for b in batch]),
         "end_positions": torch.stack([b["end_positions"] for b in batch]),
     }
@@ -239,6 +241,7 @@ def collate_eval(batch):
     out = {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+        "context_mask": torch.stack([b["context_mask"] for b in batch]),
         "id": [b["id"] for b in batch],
         "answer_text": [b["answer_text"] for b in batch],
     }

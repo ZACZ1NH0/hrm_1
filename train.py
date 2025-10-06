@@ -91,22 +91,31 @@ def best_span(start_logits, end_logits, attn_mask, max_answer_len=30):
         best_s[b] = bs; best_e[b] = be
     return best_s, best_e
 
-def best_span_and_score(start_logits, end_logits, attn_mask, max_answer_len=30):
-    B, S = start_logits.shape
-    start_scores = start_logits.masked_fill(attn_mask == 0, -1e9)
-    end_scores   = end_logits.masked_fill(attn_mask == 0, -1e9)
-    best_s = torch.zeros(B, dtype=torch.long, device=start_logits.device)
-    best_e = torch.zeros(B, dtype=torch.long, device=start_logits.device)
-    best_val = torch.full((B,), -1e9, device=start_logits.device)
+def best_span_and_score(start_logits, end_logits, attn_mask, context_mask, max_answer_len=30):
+    # valid = vừa không pad, vừa là token thuộc context
+    valid = (attn_mask == 1) & (context_mask == 1)
+    start_scores = start_logits.masked_fill(~valid, -1e9)
+    end_scores   = end_logits.masked_fill(~valid, -1e9)
+
+    B, S = start_scores.shape
+    best_s = torch.zeros(B, dtype=torch.long, device=start_scores.device)
+    best_e = torch.zeros(B, dtype=torch.long, device=start_scores.device)
+    best_val = torch.full((B,), -1e9, device=start_scores.device)
+
     for b in range(B):
-        s_scores = start_scores[b]; e_scores = end_scores[b]
         cur = -1e9; bs = be = 0
         for s in range(S):
-            e_max = min(S-1, s+30)
-            e_rel = int(torch.argmax(e_scores[s:e_max+1]))
+            if start_scores[b, s] <= -1e8:  # invalid
+                continue
+            e_max = min(S - 1, s + max_answer_len)
+            e_slice = end_scores[b, s:e_max + 1]
+            if e_slice.numel() == 0: 
+                continue
+            e_rel = int(torch.argmax(e_slice))
             e = s + e_rel
-            val = (s_scores[s] + e_scores[e]).item()
-            if val > cur: cur = val; bs = s; be = e
+            val = (start_scores[b, s] + end_scores[b, e]).item()
+            if val > cur:
+                cur = val; bs = s; be = e
         best_s[b], best_e[b], best_val[b] = bs, be, cur
     return best_s, best_e, best_val
 
@@ -143,15 +152,19 @@ def best_span_and_score(start_logits, end_logits, attn_mask, max_answer_len=30):
 #     avg_f1 = float(np.mean(f1s)) if f1s else 0.0
 #     return {"loss": avg_loss, "EM": avg_em, "F1": avg_f1}
 def evaluate(model, tokenizer, loader, device, encoder=None, amp=False, max_answer_len=30):
+    import contextlib, numpy as np
     model.eval()
-    losses = []; id2best = {}
-    import contextlib
+    losses = []
+    id2best = {}  # id -> {'pred': str, 'gold': str, 'score': float}
+
     autocast_ctx = (torch.autocast("cuda", enabled=amp and torch.cuda.is_available())
                     if torch.cuda.is_available() else contextlib.nullcontext())
+
     with torch.no_grad():
         for batch in tqdm(loader, desc="eval", leave=False):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            context_mask = batch['context_mask'].to(device)
 
             with autocast_ctx:
                 if encoder is not None:
@@ -161,7 +174,7 @@ def evaluate(model, tokenizer, loader, device, encoder=None, amp=False, max_answ
                 else:
                     out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-            if 'start_positions' in batch:
+            if 'start_positions' in batch:  # optional dev loss
                 start_positions = batch['start_positions'].to(device)
                 end_positions   = batch['end_positions'].to(device)
                 with autocast_ctx:
@@ -173,21 +186,28 @@ def evaluate(model, tokenizer, loader, device, encoder=None, amp=False, max_answ
                                          start_positions=start_positions, end_positions=end_positions)
                 losses.append(out_loss['loss'].item())
 
-            s_idx, e_idx, span_val = best_span_and_score(out['start_logits'], out['end_logits'], attention_mask, max_answer_len)
+            s_idx, e_idx, span_val = best_span_and_score(
+                out['start_logits'], out['end_logits'], attention_mask, context_mask, max_answer_len
+            )
+
             for i in range(input_ids.size(0)):
                 ex_id = batch['id'][i]
-                pred_ids = input_ids[i, s_idx[i]:e_idx[i]+1].detach().cpu().tolist()
+                pred_ids = input_ids[i, s_idx[i]: e_idx[i] + 1].detach().cpu().tolist()
                 pred_text = tokenizer.decode(pred_ids, skip_special_tokens=True)
                 score = float(span_val[i].item())
                 gold_text = batch['answer_text'][i]
-                if (ex_id not in id2best) or (score > id2best[ex_id]['score']):
+                rec = id2best.get(ex_id)
+                if (rec is None) or (score > rec['score']):
                     id2best[ex_id] = {'pred': pred_text, 'gold': gold_text, 'score': score}
 
     ems = [exact_match_score(v['pred'], v['gold']) for v in id2best.values()]
     f1s = [f1_score(v['pred'], v['gold']) for v in id2best.values()]
-    return {"loss": float(np.mean(losses)) if losses else 0.0,
-            "EM": float(np.mean(ems)) if ems else 0.0,
-            "F1": float(np.mean(f1s)) if f1s else 0.0}
+    return {
+        "loss": float(np.mean(losses)) if losses else 0.0,
+        "EM": float(np.mean(ems)) if ems else 0.0,
+        "F1": float(np.mean(f1s)) if f1s else 0.0,
+    }
+
 
 # --------- Main ---------
 
